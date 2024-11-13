@@ -20,8 +20,15 @@ class DoubanMovieCrawler:
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
         }
         self.search_url = "https://movie.douban.com/j/new_search_subjects"
-        self.total_movies = []
         
+        # 加载已爬取的数据
+        try:
+            self.total_movies = pd.read_csv('data/raw/douban_movies_3000.csv').to_dict('records')
+            print(f"Loaded {len(self.total_movies)} existing records")
+        except:
+            self.total_movies = []
+            print("Starting fresh crawl")
+            
     def get_movie_detail(self, url, max_retries=3):
         """获取电影详细信息，添加重试机制"""
         for retry in range(max_retries):
@@ -92,10 +99,18 @@ class DoubanMovieCrawler:
 
     def crawl_movies(self, total=10000):
         """爬取指定数量的电影"""
-        start = 0
+        # 计算还需要爬取的数量
+        remaining = total - len(self.total_movies)
+        if remaining <= 0:
+            print("Already have enough records")
+            return pd.DataFrame(self.total_movies)
+            
+        start = len(self.total_movies)  # 从已有数据量开始
         batch_size = 20
         consecutive_failures = 0
-        last_save_count = 0  # 记录上次保存时的数据量
+        last_save_count = len(self.total_movies)  # 更新保存计数起点
+        
+        print(f"Continuing crawl from position {start}, aiming for {remaining} more records")
         
         with ThreadPoolExecutor(max_workers=3) as executor:
             while len(self.total_movies) < total:
