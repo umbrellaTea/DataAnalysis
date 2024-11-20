@@ -17,13 +17,14 @@ class DoubanMovieCrawler:
         ]
         self.headers = {
             'User-Agent': random.choice(self.user_agents),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Cookie': 'your_cookie_here'
         }
         self.search_url = "https://movie.douban.com/j/new_search_subjects"
         
         # 加载已爬取的数据
         try:
-            self.total_movies = pd.read_csv('data/raw/douban_movies_3000.csv').to_dict('records')
+            self.total_movies = pd.read_csv('data/raw/douban_movies_9000.csv').to_dict('records')
             print(f"Loaded {len(self.total_movies)} existing records")
         except:
             self.total_movies = []
@@ -87,11 +88,17 @@ class DoubanMovieCrawler:
                     'start': start,
                     'limit': count
                 }
+                print(f"Requesting movies with params: {params}")  # 打印请求参数
                 response = requests.get(self.search_url, headers=self.headers, params=params)
+                print(f"Response status: {response.status_code}")  # 打印响应状态码
+                
                 if response.status_code == 200:
-                    return response.json().get('data', [])
+                    data = response.json()
+                    print(f"Response data: {data}")  # 打印响应数据
+                    return data.get('data', [])
+                    
                 print(f"Retry {retry + 1}/{max_retries}, status code: {response.status_code}")
-                time.sleep(5 * (retry + 1))  # 增加重试等待时间
+                time.sleep(5 * (retry + 1))
             except Exception as e:
                 print(f"Error fetching movies: {e}, retry {retry + 1}/{max_retries}")
                 time.sleep(5 * (retry + 1))
@@ -99,57 +106,60 @@ class DoubanMovieCrawler:
 
     def crawl_movies(self, total=10000):
         """爬取指定数量的电影"""
-        # 计算还需要爬取的数量
         remaining = total - len(self.total_movies)
         if remaining <= 0:
             print("Already have enough records")
             return pd.DataFrame(self.total_movies)
-            
-        start = len(self.total_movies)  # 从已有数据量开始
-        batch_size = 20
-        consecutive_failures = 0
-        last_save_count = len(self.total_movies)  # 更新保存计数起点
+        
+        start = len(self.total_movies)
+        batch_size = 10  # 每批10条
+        last_save_count = len(self.total_movies)
         
         print(f"Continuing crawl from position {start}, aiming for {remaining} more records")
+        print("Using optimized crawling strategy...")
         
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:  # 使用3个线程
             while len(self.total_movies) < total:
-                movies = self.get_movies(start, batch_size)
-                if not movies:
-                    consecutive_failures += 1
-                    if consecutive_failures >= 3:
-                        print("Too many consecutive failures, sleeping for 2 minutes...")
-                        time.sleep(120)
-                        consecutive_failures = 0
-                    continue
+                try:
+                    # 获取单批次数据
+                    movies = self.get_movies(start, batch_size)
+                    if not movies:
+                        print("No movies returned, sleeping for 30 seconds...")
+                        time.sleep(30)
+                        continue
+                    
+                    # 并行处理电影
+                    futures = []
+                    for movie in movies:
+                        if len(self.total_movies) >= total:
+                            break
+                        futures.append(
+                            executor.submit(self.get_movie_detail, movie['url'])
+                        )
+                    
+                    # 收集结果
+                    for future in futures:
+                        movie_detail = future.result()
+                        if movie_detail and len(self.total_movies) < total:
+                            self.total_movies.append(movie_detail)
+                            current_count = len(self.total_movies)
+                            print(f"Crawled: {movie_detail['title']} ({current_count}/{total})")
+                            
+                            # 每50条保存一次
+                            if current_count % 50 == 0:
+                                df = pd.DataFrame(self.total_movies)
+                                save_path = f'data/raw/douban_movies_{current_count}.csv'
+                                df.to_csv(save_path, index=False, encoding='utf-8')
+                                print(f"Saved progress to {save_path}")
                 
-                consecutive_failures = 0
-                
-                futures = []
-                for movie in movies:
-                    if len(self.total_movies) >= total:
-                        break
-                    futures.append(
-                        executor.submit(self.get_movie_detail, movie['url'])
-                    )
-                
-                for future in futures:
-                    movie_detail = future.result()
-                    if movie_detail and len(self.total_movies) < total:
-                        self.total_movies.append(movie_detail)
-                        current_count = len(self.total_movies)
-                        print(f"Crawled: {movie_detail['title']} ({current_count}/{total})")
-                        
-                        # 每1000条数据保存一次
-                        if current_count // 1000 > last_save_count // 1000:
-                            df = pd.DataFrame(self.total_movies)
-                            save_path = f'data/raw/douban_movies_{current_count}.csv'
-                            df.to_csv(save_path, index=False, encoding='utf-8')
-                            print(f"\nSaved {current_count} movies to {save_path}")
-                            last_save_count = current_count
-                
-                start += batch_size
-                time.sleep(random.uniform(1, 2))
+                    start += batch_size
+                    # 每批次后休息3-5秒
+                    time.sleep(random.uniform(3, 5))
+                    
+                except Exception as e:
+                    print(f"Error occurred: {str(e)}")
+                    print("Sleeping for 30 seconds before retry...")
+                    time.sleep(30)
         
         # 保存最终数据
         df = pd.DataFrame(self.total_movies)
